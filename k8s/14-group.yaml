@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: group, labels: { app: group } }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: group } }
+  template:
+    metadata: { labels: { app: group, tier: internal } }
+    spec:
+      containers:
+      - name: group
+        image: REGISTRY/movie-groups-group:latest   # แทน REGISTRY ด้วย ECR repo ของคุณ
+        ports: [{ containerPort: 4005 }]
+        envFrom: [{ configMapRef: { name: service-urls } }]
+        env:
+        - { name: INTERNAL_KEY, valueFrom: { secretKeyRef: { name: app-secrets, key: INTERNAL_KEY } } }
+        - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: app-secrets, key: DB_GROUPS } } }
+        readinessProbe: { httpGet: { path: /health, port: 4005 }, periodSeconds: 5 }
+        livenessProbe: { httpGet: { path: /health, port: 4005 }, initialDelaySeconds: 20, periodSeconds: 10 }
+        resources: { requests: { cpu: 100m, memory: 192Mi }, limits: { cpu: 500m, memory: 512Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: group }
+spec:
+  selector: { app: group }
+  ports: [{ port: 4005, targetPort: 4005 }]

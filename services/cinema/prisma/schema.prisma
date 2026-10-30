@@ -1,0 +1,21 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// เก็บแค่ "รหัส" จังหวัด/เขต (ไม่มี FK ข้าม service) — ตรวจ/แปลงชื่อผ่าน location-service
+model Cinema {
+  id           Int    @id @default(autoincrement())
+  chain        String // MAJOR | SF
+  name         String
+  provinceCode String @map("province_code") @db.VarChar(2)
+  districtCode String @map("district_code") @db.VarChar(4)
+  address      String
+  lat          Float
+  lng          Float
+  @@index([provinceCode, districtCode])
+  @@map("cinemas")
+}

@@ -1,0 +1,31 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// รหัสกรมการปกครอง: จังหวัด 2 หลัก, อำเภอ/เขต 4 หลัก, ตำบล/แขวง 6 หลัก
+model Province {
+  code   String @id @db.VarChar(2)
+  nameTh String @map("name_th")
+  nameEn String @map("name_en")
+  @@map("provinces")
+}
+model District {
+  code         String @id @db.VarChar(4)
+  provinceCode String @map("province_code") @db.VarChar(2)
+  nameTh       String @map("name_th")
+  nameEn       String @map("name_en")
+  @@index([provinceCode])
+  @@map("districts")
+}
+model Subdistrict {
+  code         String @id @db.VarChar(6)
+  districtCode String @map("district_code") @db.VarChar(4)
+  nameTh       String @map("name_th")
+  nameEn       String @map("name_en")
+  @@index([districtCode])
+  @@map("subdistricts")
+}

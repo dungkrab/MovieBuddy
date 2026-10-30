@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: service-urls }
+data:
+  LOCATION_URL: http://location:4001
+  CINEMA_URL: http://cinema:4002
+  SHOWTIME_URL: http://showtime:4003
+  MOVIE_URL: http://movie:4004
+  GROUP_URL: http://group:4005
+  AUTH_URL: http://auth:4006

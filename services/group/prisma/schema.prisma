@@ -1,0 +1,47 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ไม่มี FK ข้าม service: เก็บรหัส+ชื่อพื้นที่ (denormalize จาก location-service ตอนสร้าง), userId/movieTmdbId เป็นตัวเลขอ้างอิงเฉยๆ
+model MovieGroup {
+  id              Int           @id @default(autoincrement())
+  movieTmdbId     Int           @map("movie_tmdb_id")
+  title           String
+  description     String?
+  provinceCode    String        @map("province_code") @db.VarChar(2)
+  provinceName    String        @map("province_name")
+  districtCode    String?       @map("district_code") @db.VarChar(4)
+  districtName    String?       @map("district_name")
+  subdistrictCode String?       @map("subdistrict_code") @db.VarChar(6)
+  subdistrictName String?       @map("subdistrict_name")
+  preferredTime   DateTime?     @map("preferred_time")
+  maxMembers      Int           @default(6) @map("max_members")
+  hostName        String        @map("host_name")
+  hostUserId      Int           @map("host_user_id")
+  movieTitle      String        @default("") @map("movie_title")
+  endsAt          DateTime      @default(now()) @map("ends_at")      // เวลารอบหนังจบ = เวลานัด + ความยาวหนัง
+  expiresAt       DateTime      @default(now()) @map("expires_at")   // endsAt + 12 ชม. → ลบอัตโนมัติ
+  contact         String?
+  createdAt       DateTime      @default(now()) @map("created_at")
+  members         GroupMember[]
+  @@index([movieTmdbId, provinceCode, districtCode])
+  @@index([hostUserId])
+  @@index([expiresAt])
+  @@map("movie_groups")
+}
+
+model GroupMember {
+  id       Int        @id @default(autoincrement())
+  groupId  Int        @map("group_id")
+  userId   Int        @map("user_id")
+  name     String
+  contact  String?
+  joinedAt DateTime   @default(now()) @map("joined_at")
+  group    MovieGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  @@unique([groupId, userId])
+  @@map("group_members")
+}

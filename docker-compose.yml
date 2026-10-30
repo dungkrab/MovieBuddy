@@ -1,0 +1,80 @@
+services:
+  db:
+    image: postgres:16
+    environment: { POSTGRES_USER: movie, POSTGRES_PASSWORD: movie, POSTGRES_DB: postgres }
+    ports: ["5433:5432"]  # เปิดไว้ debug (พอร์ต 5433 กันชนกับ Postgres ในเครื่อง)
+    volumes: ["./infra/init-dbs.sql:/docker-entrypoint-initdb.d/init.sql", "pgdata:/var/lib/postgresql/data"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U movie"], interval: 3s, retries: 20 }
+  redis:
+    image: redis:7-alpine
+  location:
+    build: { context: ., dockerfile: services/location/Dockerfile }
+    environment:
+      INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
+      DATABASE_URL: postgresql://movie:movie@db:5432/location
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+  cinema:
+    build: { context: ., dockerfile: services/cinema/Dockerfile }
+    environment:
+      INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
+      DATABASE_URL: postgresql://movie:movie@db:5432/cinema
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+  showtime:
+    build: { context: ., dockerfile: services/showtime/Dockerfile }
+    environment:
+      INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+  movie:
+    build: { context: ., dockerfile: services/movie/Dockerfile }
+    environment:
+      INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
+      TMDB_ACCESS_TOKEN: ${TMDB_ACCESS_TOKEN:?set TMDB_ACCESS_TOKEN}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+    restart: unless-stopped
+  group:
+    build: { context: ., dockerfile: services/group/Dockerfile }
+    environment:
+      INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
+      DATABASE_URL: postgresql://movie:movie@db:5432/groups
+      MOVIE_URL: http://movie:4004
+      LOCATION_URL: http://location:4001
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+  auth:
+    build: { context: ., dockerfile: services/auth/Dockerfile }
+    environment:
+      INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
+      DATABASE_URL: postgresql://movie:movie@db:5432/auth
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET}
+      SMS_PROVIDER: ${SMS_PROVIDER:-console}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM: ${TWILIO_FROM:-}
+      NODE_ENV: development
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+  web:
+    build: { context: ., dockerfile: web/Dockerfile }
+    ports: ["3000:3000"]
+    environment:
+      INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
+      LOCATION_URL: http://location:4001
+      CINEMA_URL: http://cinema:4002
+      SHOWTIME_URL: http://showtime:4003
+      MOVIE_URL: http://movie:4004
+      GROUP_URL: http://group:4005
+      AUTH_URL: http://auth:4006
+    depends_on: [location, cinema, showtime, movie, group, auth]
+volumes:
+  pgdata:
