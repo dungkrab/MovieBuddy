@@ -51,7 +51,10 @@ export default function MyGroupsPage() {
                 <span className="chip shrink-0">{g._count.members}/{g.maxMembers} คน</span>
               </div>
               {g.contact && <p className="mt-2 text-sm">ติดต่อกลุ่ม: <b>{g.contact}</b></p>}
-              {g.isHost && <button onClick={() => del(g)} className="mt-3 rounded-lg border border-red-300 px-3 py-1.5 text-sm text-red-600">ลบกลุ่ม</button>}
+              <div className="mt-3 flex gap-2">
+                <Link href={`/groups/${g.id}`} className="rounded-lg bg-red-600 px-3 py-1.5 text-sm text-white">💬 แชทกลุ่ม</Link>
+                {g.isHost && <button onClick={() => del(g)} className="rounded-lg border border-red-300 px-3 py-1.5 text-sm text-red-600">ลบกลุ่ม</button>}
+              </div>
             </div>
           );
         })}

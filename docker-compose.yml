@@ -1,8 +1,9 @@
 services:
   db:
+    profiles: ["local-db"]   # ใช้ RDS ให้เอา local-db ออกจาก COMPOSE_PROFILES ใน .env
     image: postgres:16
     environment: { POSTGRES_USER: movie, POSTGRES_PASSWORD: movie, POSTGRES_DB: postgres }
-    ports: ["5433:5432"]  # เปิดไว้ debug (พอร์ต 5433 กันชนกับ Postgres ในเครื่อง)
+    ports: ["127.0.0.1:5433:5432"]  # เปิดเฉพาะในเครื่องไว้ debug (5433 กันชนกับ Postgres ที่ลงไว้เอง)
     volumes: ["./infra/init-dbs.sql:/docker-entrypoint-initdb.d/init.sql", "pgdata:/var/lib/postgresql/data"]
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U movie"], interval: 3s, retries: 20 }
   redis:
@@ -11,24 +12,26 @@ services:
     build: { context: ., dockerfile: services/location/Dockerfile }
     environment:
       INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
-      DATABASE_URL: postgresql://movie:movie@db:5432/location
+      DATABASE_URL: ${DB_LOCATION:-postgresql://movie:movie@db:5432/location}
+      NOMINATIM_URL: ${NOMINATIM_URL:-https://nominatim.openstreetmap.org}
+      GEOCODER_USER_AGENT: ${GEOCODER_USER_AGENT:-MovieBuddy/1.0 (set GEOCODER_USER_AGENT)}
     depends_on:
-      db: { condition: service_healthy }
+      db: { condition: service_healthy, required: false }
     restart: unless-stopped
   cinema:
     build: { context: ., dockerfile: services/cinema/Dockerfile }
     environment:
       INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
-      DATABASE_URL: postgresql://movie:movie@db:5432/cinema
+      DATABASE_URL: ${DB_CINEMA:-postgresql://movie:movie@db:5432/cinema}
     depends_on:
-      db: { condition: service_healthy }
+      db: { condition: service_healthy, required: false }
     restart: unless-stopped
   showtime:
     build: { context: ., dockerfile: services/showtime/Dockerfile }
     environment:
       INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
     depends_on:
-      db: { condition: service_healthy }
+      db: { condition: service_healthy, required: false }
     restart: unless-stopped
   movie:
     build: { context: ., dockerfile: services/movie/Dockerfile }
@@ -37,36 +40,52 @@ services:
       TMDB_ACCESS_TOKEN: ${TMDB_ACCESS_TOKEN:?set TMDB_ACCESS_TOKEN}
       REDIS_URL: redis://redis:6379
     depends_on:
-      db: { condition: service_healthy }
+      db: { condition: service_healthy, required: false }
       redis: { condition: service_started }
     restart: unless-stopped
   group:
     build: { context: ., dockerfile: services/group/Dockerfile }
     environment:
       INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
-      DATABASE_URL: postgresql://movie:movie@db:5432/groups
+      DATABASE_URL: ${DB_GROUPS:-postgresql://movie:movie@db:5432/groups}
       MOVIE_URL: http://movie:4004
       LOCATION_URL: http://location:4001
     depends_on:
-      db: { condition: service_healthy }
+      db: { condition: service_healthy, required: false }
+    restart: unless-stopped
+  cognito-local:   # ตัวจำลอง Cognito สำหรับเทสต์บนเครื่อง — ดูรหัส SMS ได้จาก `docker compose logs cognito-local`
+    profiles: ["local-auth"]
+    build: { context: infra/cognito-local }
+    ports: ["127.0.0.1:9229:9229"]
+    volumes: ["cognito-data:/data/.cognito/db"]
     restart: unless-stopped
   auth:
     build: { context: ., dockerfile: services/auth/Dockerfile }
     environment:
       INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
-      DATABASE_URL: postgresql://movie:movie@db:5432/auth
-      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET}
-      SMS_PROVIDER: ${SMS_PROVIDER:-console}
-      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
-      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
-      TWILIO_FROM: ${TWILIO_FROM:-}
-      NODE_ENV: development
+      DATABASE_URL: ${DB_AUTH:-postgresql://movie:movie@db:5432/auth}
+      AWS_REGION: ${AWS_REGION:-ap-southeast-1}
+      # ตั้ง COGNITO_ENDPOINT ว่าง (COGNITO_ENDPOINT=) เพื่อใช้ Cognito จริงของ AWS; ค่าเริ่มต้นชี้ไปตัวจำลอง
+      COGNITO_ENDPOINT: ${COGNITO_ENDPOINT-http://cognito-local:9229}
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID:-}
+      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
     depends_on:
-      db: { condition: service_healthy }
+      db: { condition: service_healthy, required: false }
+      cognito-local: { condition: service_started, required: false }
+    restart: unless-stopped
+  chat:
+    build: { context: ., dockerfile: services/chat/Dockerfile }
+    environment:
+      INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
+      DATABASE_URL: ${DB_CHAT:-postgresql://movie:movie@db:5432/chat}
+      GROUP_URL: http://group:4005
+    depends_on:
+      db: { condition: service_healthy, required: false }
+      group: { condition: service_started }
     restart: unless-stopped
   web:
     build: { context: ., dockerfile: web/Dockerfile }
-    ports: ["3000:3000"]
+    ports: ["127.0.0.1:3000:3000"]   # เข้าจากภายนอกผ่าน Caddy (profile edge) เท่านั้น
     environment:
       INTERNAL_KEY: ${INTERNAL_KEY:?set INTERNAL_KEY}
       LOCATION_URL: http://location:4001
@@ -75,6 +94,21 @@ services:
       MOVIE_URL: http://movie:4004
       GROUP_URL: http://group:4005
       AUTH_URL: http://auth:4006
-    depends_on: [location, cinema, showtime, movie, group, auth]
+      CHAT_URL: http://chat:4007
+      COOKIE_SECURE: ${COOKIE_SECURE:-}
+    depends_on: [location, cinema, showtime, movie, group, auth, chat]
+    restart: unless-stopped
+  caddy:   # HTTPS หน้าบ้านสำหรับ production (เปิดด้วย COMPOSE_PROFILES=edge)
+    profiles: ["edge"]
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", "caddy-data:/data", "caddy-config:/config"]
+    depends_on: [web]
+    restart: unless-stopped
 volumes:
   pgdata:
+  cognito-data:
+  caddy-data:
+  caddy-config:

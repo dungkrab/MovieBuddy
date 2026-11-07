@@ -17,7 +17,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <main className="mx-auto min-h-[70vh] max-w-6xl px-4 py-6">{children}</main>
         <footer className="border-t border-zinc-200 py-6 text-center text-xs text-zinc-500 dark:border-zinc-800">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="https://www.themoviedb.org/assets/2/v4/logos/v2/blue_short-8e7b30f73a4020692ccca9c88bafe5dcb6f8a62a4c6bc55cd9ba82bb2cd95f6c.svg" alt="TMDB" className="mx-auto mb-2 h-4" />
+          <img src="https://www.themoviedb.org/assets/v4/logos/v2/blue_square_2-d537fb228cf3ded904ef09b136fe3fec72548ebc1fea3fbbd1ad9e36364db38b.svg" alt="TMDB" className="mx-auto mb-2 h-4" />
           This product uses the TMDB API but is not endorsed or certified by TMDB.
         </footer>
       </body>

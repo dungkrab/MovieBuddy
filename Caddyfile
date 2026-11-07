@@ -1,0 +1,10 @@
+# ตัวหน้าบ้านของ production (profile "edge" ใน docker-compose)
+# SITE_ADDRESS=ชื่อโดเมน (เช่น movie.example.com) → Caddy ขอและต่ออายุใบรับรอง HTTPS (Let's Encrypt) ให้เอง
+#   ต้องให้ DNS ชี้มาที่เครื่องนี้ และเปิดพอร์ต 80/443 ใน security group
+# ไม่ตั้ง = ":80" (HTTP ล้วน ใช้ทดสอบ — GPS ของเบราว์เซอร์จะใช้ไม่ได้ ยกเว้นเปิดผ่าน localhost)
+{$SITE_ADDRESS::80} {
+  encode zstd gzip
+  reverse_proxy web:3000 {
+    flush_interval -1   # ส่งข้อมูลทันที ไม่บัฟเฟอร์ — จำเป็นกับแชท (SSE)
+  }
+}

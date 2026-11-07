@@ -1,0 +1,22 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ไม่มี FK ข้าม service: groupId/userId เป็นตัวเลขอ้างอิง (สิทธิ์เข้าห้องถามจาก group-service ทุกครั้ง)
+// ข้อความหมดอายุพร้อมกลุ่ม (expiresAt = เวลาหมดอายุของกลุ่มตอนส่งข้อความ) แล้วถูกลบอัตโนมัติ
+model Message {
+  id        Int      @id @default(autoincrement())
+  groupId   Int      @map("group_id")
+  userId    Int      @map("user_id")
+  userName  String   @map("user_name") // เก็บชื่อ ณ ตอนส่ง
+  body      String
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+  @@index([groupId, id])
+  @@index([expiresAt])
+  @@map("messages")
+}

@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { PrismaClient } from "@prisma/client";
 import { Hono } from "hono";
 import { guard } from "../../shared/guard";
+import { inThailand, reverseGeocode, type Db } from "./reverse";
 import { ensureSeed } from "./seed";
 
 const prisma = new PrismaClient();
@@ -29,6 +30,25 @@ app.get("/validate", async (c) => {
   const s = subdistrict && d ? await prisma.subdistrict.findFirst({ where: { code: subdistrict, districtCode: d.code } }) : null;
   if (subdistrict && !s) return c.json({ ok: false, error: "ตำบลไม่อยู่ในเขตที่เลือก" });
   return c.json({ ok: true, province: { nameTh: p.nameTh }, district: d && { nameTh: d.nameTh }, subdistrict: s && { nameTh: s.nameTh } });
+});
+
+// GPS → จังหวัด/เขต/แขวง (หน้าเว็บใช้เติมและล็อกช่องตำแหน่งให้ตามพิกัด)
+const db: Db = {
+  provinces: () => prisma.province.findMany({ select: { code: true, nameTh: true } }),
+  districts: (provinceCode) => prisma.district.findMany({ where: { provinceCode }, select: { code: true, nameTh: true } }),
+  subdistricts: (districtCode) => prisma.subdistrict.findMany({ where: { districtCode }, select: { code: true, nameTh: true } }),
+};
+app.get("/reverse", async (c) => {
+  const lat = Number(c.req.query("lat")), lng = Number(c.req.query("lng"));
+  if (!c.req.query("lat") || !c.req.query("lng") || !Number.isFinite(lat) || !Number.isFinite(lng)) return c.json({ ok: false, error: "พิกัดไม่ถูกต้อง" }, 400);
+  if (!inThailand(lat, lng)) return c.json({ ok: false, error: "ตำแหน่งปัจจุบันอยู่นอกประเทศไทย" });
+  try {
+    const place = await reverseGeocode(db, lat, lng);
+    return c.json(place ? { ok: true, ...place } : { ok: false, error: "ระบุจังหวัด/เขตจากตำแหน่งไม่ได้" });
+  } catch (e) {
+    console.error("reverse failed:", (e as Error).message);
+    return c.json({ ok: false, error: "บริการค้นหาที่อยู่จากพิกัดไม่พร้อมใช้งาน" }, 502);
+  }
 });
 
 serve({ fetch: app.fetch, port: Number(process.env.PORT ?? 4001) });

@@ -17,5 +17,6 @@ model Cinema {
   lat          Float
   lng          Float
   @@index([provinceCode, districtCode])
+  @@index([lat, lng]) // ใช้กรอบสี่เหลี่ยมก่อนคำนวณระยะ (GPS)
   @@map("cinemas")
 }

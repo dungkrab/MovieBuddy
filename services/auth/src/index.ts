@@ -1,87 +1,99 @@
-import crypto from "crypto";
 import { serve } from "@hono/node-server";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { Hono } from "hono";
 import { guard } from "../../shared/guard";
+import * as cognito from "./cognito";
+import { AuthError } from "./cognito";
 import { maskPhone, normalizeThaiPhone } from "./phone";
-import { getSmsProvider } from "./sms";
 
 const prisma = new PrismaClient();
 const app = new Hono();
 app.get("/health", (c) => c.json({ ok: true }));
 app.use("*", guard());
+cognito.config().catch((e) => { console.error("[auth] cognito config error:", e.message); if (process.env.NODE_ENV === "production") process.exit(1); }); // fail fast
 
-const SESSION_DAYS = 30;
-function secret() {
-  const s = process.env.AUTH_SECRET;
-  if (!s || s.length < 32) throw new Error("AUTH_SECRET must be set (>= 32 chars)");
-  return s;
+app.onError((e, c) => {
+  if (e instanceof AuthError) return c.json({ error: e.message, ...e.extra }, e.status as any);
+  console.error("[auth] unhandled:", e);
+  return c.json({ error: "เกิดข้อผิดพลาด ลองใหม่อีกครั้ง" }, 500);
+});
+
+const body = async (c: any) => (await c.req.json().catch(() => null)) ?? {};
+const phoneOf = (b: any) => { const p = normalizeThaiPhone(b.phone); if (!p) throw new AuthError(400, "เบอร์ไม่ถูกต้อง (เบอร์มือถือไทย 10 หลัก เช่น 0812345678)"); return p; };
+const codeOf = (b: any) => { const s = String(b.code ?? "").trim(); if (!/^\d{4,8}$/.test(s)) throw new AuthError(400, "รหัสไม่ถูกต้องหรือหมดอายุ"); return s; };
+const passwordOf = (b: any) => { const s = typeof b.password === "string" ? b.password : ""; if (s.length < 8 || s.length > 64 || !/\d/.test(s)) throw new AuthError(400, "รหัสผ่านต้องยาว 8–64 ตัวอักษร และมีตัวเลข"); return s; };
+const tokenOf = (c: any) => c.req.header("authorization")?.replace(/^Bearer /i, "") ?? "";
+
+/** หาผู้ใช้ภายในจาก sub ของ Cognito; ครั้งแรกจะดึงเบอร์/ชื่อจาก Cognito แล้วสร้างแถว หรือผูกกับผู้ใช้เก่า (ระบบ OTP) ด้วยเบอร์โทรเดียวกัน */
+async function userFor(sub: string, accessToken: string) {
+  const found = await prisma.user.findUnique({ where: { cognitoSub: sub } });
+  if (found) return found;
+  const p = await cognito.getProfile(accessToken);
+  const phone = normalizeThaiPhone(p.phone);
+  if (!phone) throw new AuthError(502, "บัญชี Cognito ไม่มีเบอร์โทร");
+  const name = p.name?.trim().slice(0, 40) || null;
+  try {
+    const legacy = await prisma.user.findUnique({ where: { phone } });
+    if (legacy) return await prisma.user.update({ where: { id: legacy.id }, data: { cognitoSub: sub, name: legacy.name ?? name } }); // เบอร์ผ่าน SMS ยืนยันแล้ว → ผูกบัญชีเก่าให้ (กลุ่มเดิมยังอยู่)
+    return await prisma.user.create({ data: { cognitoSub: sub, phone, name } });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") { // คำขอแรกสองอันชนกัน → ใช้แถวที่อีกอันสร้างไว้
+      const again = await prisma.user.findUnique({ where: { cognitoSub: sub } });
+      if (again) return again;
+    }
+    throw e;
+  }
 }
-secret(); // fail fast ตอนเริ่มระบบ
-const sha256 = (s: string) => crypto.createHash("sha256").update(s).digest("hex");
-const hashOtp = (phone: string, code: string) => crypto.createHmac("sha256", secret()).update(`${phone}:${code}`).digest("hex");
-const safeEqual = (a: string, b: string) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && crypto.timingSafeEqual(x, y); };
+const publicUser = (u: { id: number; name: string | null; phone: string }) => ({ id: u.id, name: u.name, phone: maskPhone(u.phone) });
 
-app.post("/otp/request", async (c) => {
-  const b = await c.req.json().catch(() => null);
-  const phone = normalizeThaiPhone(b?.phone);
-  if (!phone) return c.json({ error: "เบอร์ไม่ถูกต้อง (เบอร์มือถือไทย 10 หลัก เช่น 0812345678)" }, 400);
-  const now = Date.now();
-  const recent = await prisma.otpCode.findMany({ where: { phone, createdAt: { gte: new Date(now - 3600e3) } }, orderBy: { createdAt: "desc" } });
-  const wait = recent[0] ? 60 - Math.floor((now - +recent[0].createdAt) / 1000) : 0;
-  if (wait > 0) return c.json({ error: `ขอรหัสใหม่ได้ใน ${wait} วินาที`, retryAfter: wait }, 429);
-  if (recent.length >= 5) return c.json({ error: "ขอรหัสบ่อยเกินไป ลองใหม่ภายใน 1 ชั่วโมง" }, 429);
-
-  let sms;
-  try { sms = getSmsProvider(); } catch { return c.json({ error: "SMS provider is not configured" }, 500); }
-  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
-  const row = await prisma.otpCode.create({ data: { phone, codeHash: hashOtp(phone, code), expiresAt: new Date(now + 5 * 60e3) } });
-  try { await sms.send(phone, `รหัสยืนยัน ${code} หมดอายุใน 5 นาที ห้ามบอกผู้อื่น`); }
-  catch { await prisma.otpCode.delete({ where: { id: row.id } }).catch(() => {}); return c.json({ error: "ส่ง SMS ไม่สำเร็จ ลองใหม่อีกครั้ง" }, 502); }
-  return c.json({ ok: true, expiresIn: 300, ...(sms.isConsole && process.env.NODE_ENV !== "production" && { devCode: code }) });
+app.post("/signup", async (c) => {
+  const b = await body(c);
+  const name = typeof b.name === "string" ? b.name.trim().slice(0, 40) : "";
+  if (!name) throw new AuthError(400, "กรอกชื่อที่ใช้แสดง");
+  await cognito.signUp(phoneOf(b), passwordOf(b), name);
+  return c.json({ ok: true, needsConfirm: true });
 });
+app.post("/confirm", async (c) => { const b = await body(c); await cognito.confirmSignUp(phoneOf(b), codeOf(b)); return c.json({ ok: true }); });
+app.post("/resend", async (c) => { const b = await body(c); await cognito.resendCode(phoneOf(b)); return c.json({ ok: true }); });
 
-app.post("/otp/verify", async (c) => {
-  const BAD = () => c.json({ error: "รหัสไม่ถูกต้องหรือหมดอายุ" }, 400);
-  const b = await c.req.json().catch(() => null);
-  const phone = normalizeThaiPhone(b?.phone);
-  const code = String(b?.code ?? "").trim();
-  if (!phone || !/^\d{6}$/.test(code)) return BAD();
-  const otp = await prisma.otpCode.findFirst({ where: { phone, consumedAt: null, expiresAt: { gt: new Date() } }, orderBy: { createdAt: "desc" } });
-  if (!otp) return BAD();
-  const bump = await prisma.otpCode.updateMany({ where: { id: otp.id, attempts: { lt: 5 }, consumedAt: null }, data: { attempts: { increment: 1 } } });
-  if (bump.count === 0) return c.json({ error: "ลองผิดเกินกำหนด กรุณาขอรหัสใหม่" }, 400);
-  if (!safeEqual(otp.codeHash, hashOtp(phone, code))) return BAD();
-  const used = await prisma.otpCode.updateMany({ where: { id: otp.id, consumedAt: null }, data: { consumedAt: new Date() } });
-  if (used.count === 0) return BAD();
-
-  const user = await prisma.user.upsert({ where: { phone }, create: { phone }, update: {} });
-  const token = crypto.randomBytes(32).toString("hex");
-  const expiresAt = new Date(Date.now() + SESSION_DAYS * 864e5);
-  await prisma.session.create({ data: { tokenHash: sha256(token), userId: user.id, expiresAt } });
-  prisma.otpCode.deleteMany({ where: { createdAt: { lt: new Date(Date.now() - 864e5) } } }).catch(() => {});
-  return c.json({ token, expiresAt, user: { id: user.id, name: user.name }, needsName: !user.name }); // web ตั้ง cookie HttpOnly ให้
+app.post("/login", async (c) => {
+  const b = await body(c);
+  const t = await cognito.login(phoneOf(b), typeof b.password === "string" ? b.password : "");
+  const v = await cognito.verifyAccessToken(t.accessToken);
+  if (!v || "expired" in v) throw new AuthError(502, "ตรวจโทเคนไม่ผ่าน (ตั้งค่า issuer/JWKS ของ Cognito ถูกต้องหรือไม่)");
+  const u = await userFor(v.sub, t.accessToken);
+  return c.json({ ...t, user: publicUser(u), needsName: !u.name }); // web เก็บโทเคนใน cookie HttpOnly ไม่ส่งต่อให้เบราว์เซอร์
 });
-
+app.post("/refresh", async (c) => {
+  const b = await body(c);
+  if (typeof b.refreshToken !== "string" || !b.refreshToken) throw new AuthError(401, "เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่");
+  return c.json(await cognito.refresh(b.refreshToken));
+});
 app.get("/session", async (c) => {
-  const token = c.req.query("token");
-  const s = token ? await prisma.session.findUnique({ where: { tokenHash: sha256(token) }, include: { user: true } }) : null;
-  if (!s || s.expiresAt < new Date()) return c.json({ user: null });
-  return c.json({ user: { id: s.user.id, name: s.user.name, phone: maskPhone(s.user.phone) } });
+  const token = tokenOf(c);
+  const v = token ? await cognito.verifyAccessToken(token) : null;
+  if (!v) return c.json({ user: null });
+  if ("expired" in v) return c.json({ user: null, reason: "expired" });
+  return c.json({ user: publicUser(await userFor(v.sub, token)) });
 });
+app.post("/logout", async (c) => { const b = await body(c); if (typeof b.refreshToken === "string" && b.refreshToken) await cognito.revoke(b.refreshToken); return c.json({ ok: true }); });
+
+// ลืมรหัสผ่าน: ตอบ ok เสมอ ไม่บอกว่าเบอร์นี้มีบัญชีหรือไม่
+app.post("/password/forgot", async (c) => {
+  const phone = phoneOf(await body(c));
+  try { await cognito.forgotPassword(phone); }
+  catch (e) { if (!(e instanceof AuthError && [400, 401, 403, 404].includes(e.status))) throw e; }
+  return c.json({ ok: true });
+});
+app.post("/password/reset", async (c) => { const b = await body(c); await cognito.resetPassword(phoneOf(b), codeOf(b), passwordOf(b)); return c.json({ ok: true }); });
 
 app.patch("/users/:id", async (c) => {
-  const b = await c.req.json().catch(() => null);
-  const name = typeof b?.name === "string" ? b.name.trim().slice(0, 40) : "";
+  const b = await body(c);
+  const name = typeof b.name === "string" ? b.name.trim().slice(0, 40) : "";
   if (!name) return c.json({ error: "กรอกชื่อที่ใช้แสดง" }, 400);
-  await prisma.user.update({ where: { id: Number(c.req.param("id")) }, data: { name } });
-  return c.json({ user: { id: Number(c.req.param("id")), name } });
-});
-
-app.post("/logout", async (c) => {
-  const b = await c.req.json().catch(() => null);
-  if (typeof b?.token === "string") await prisma.session.deleteMany({ where: { tokenHash: sha256(b.token) } });
-  return c.json({ ok: true });
+  const id = Number(c.req.param("id"));
+  await prisma.user.update({ where: { id }, data: { name } });
+  return c.json({ user: { id, name } });
 });
 
 serve({ fetch: app.fetch, port: Number(process.env.PORT ?? 4006) });

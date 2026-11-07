@@ -9,7 +9,7 @@ const when = (s: string) => new Date(s).toLocaleString("th-TH", { dateStyle: "me
 const post = (url: string, body: unknown) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(async (r) => ({ ok: r.ok, data: await r.json().catch(() => ({})) }));
 
 export default function Groups({ movieId, mode, date, time, cinema }: Props) {
-  const [loc, setLoc] = useState<{ province?: string; district?: string }>({});
+  const [loc, setLoc] = useState<{ province?: string; district?: string; subdistrict?: string }>({});
   const area = cinema ? { province: cinema.provinceCode, district: cinema.districtCode } : loc; // มาจากรอบฉาย → ใช้พื้นที่ของสาขานั้น
   const [me, setMe] = useState<{ id: number; name: string | null } | null | undefined>(undefined);
   const [next, setNext] = useState("/");
@@ -33,8 +33,8 @@ export default function Groups({ movieId, mode, date, time, cinema }: Props) {
   useEffect(() => {
     if (!area.province) return;
     fetch(`/api/locations/districts?province=${area.province}`).then((r) => r.json()).then(setDistricts).catch(() => {});
-    setF((x) => ({ ...x, districtCode: area.district ?? "" }));
-  }, [area.province, area.district]);
+    setF((x) => ({ ...x, districtCode: area.district ?? "", subdistrictCode: cinema ? "" : loc.subdistrict ?? "" })); // พื้นที่จาก GPS เติมแขวง/ตำบลให้ด้วย
+  }, [area.province, area.district, loc.subdistrict]);
   useEffect(() => { setSubs([]); if (f.districtCode) fetch(`/api/locations/subdistricts?district=${f.districtCode}`).then((r) => r.json()).then(setSubs).catch(() => {}); }, [f.districtCode]);
 
   const load = useCallback(() => {

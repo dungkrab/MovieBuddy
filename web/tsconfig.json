@@ -1,1 +1,49 @@
-{"compilerOptions":{"target":"ES2022","lib":["dom","esnext"],"module":"esnext","moduleResolution":"bundler","jsx":"preserve","strict":true,"noEmit":true,"esModuleInterop":true,"skipLibCheck":true,"incremental":true,"plugins":[{"name":"next"}],"paths":{"@/*":["./*"]}},"include":["**/*.ts","**/*.tsx","next-env.d.ts",".next/types/**/*.ts"],"exclude":["node_modules"]}
+{
+  "compilerOptions": {
+    // JavaScript version
+    "target": "ES2022",
+    "lib": [
+      "dom",
+      "esnext"
+    ],
+    // Module configuration
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    // JSX configuration
+    "jsx": "preserve",
+    // Type checking
+    "strict": true, //Prevent Runtime error
+    "noEmit": true,
+    // Compatibility
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    // Build performance
+    "incremental": true,
+    // Next.js plugin
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    // Path aliases
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    },
+    "allowJs": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true
+  },
+  // Files to include
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "next-env.d.ts",
+    ".next/types/**/*.ts"
+  ],
+  // Files to exclude
+  "exclude": [
+    "node_modules"
+  ]
+}

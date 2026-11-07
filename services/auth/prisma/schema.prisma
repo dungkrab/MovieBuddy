@@ -6,32 +6,13 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ตัวตนจริง (รหัสผ่าน/OTP/โทเคน) อยู่ที่ Amazon Cognito — ตารางนี้เก็บแค่ id ภายในที่ service อื่นใช้อ้างอิง (group/chat) + ชื่อที่แสดง
+// หมายเหตุย้ายจากระบบ OTP เดิม: ตาราง otp_codes และ sessions เลิกใช้แล้ว (ถ้ามีข้อมูลค้าง ให้ DROP เองก่อนรัน db push)
 model User {
-  id        Int       @id @default(autoincrement())
-  phone     String    @unique // E.164 เช่น +66812345678
-  name      String?
-  createdAt DateTime  @default(now()) @map("created_at")
-  sessions  Session[]
+  id         Int      @id @default(autoincrement())
+  cognitoSub String?  @unique @map("cognito_sub") // null = ผู้ใช้เก่าจากระบบ OTP ที่ยังไม่เคยล็อกอินด้วย Cognito (จะผูกให้อัตโนมัติด้วยเบอร์โทร)
+  phone      String   @unique // E.164 เช่น +66812345678 (Cognito ยืนยันด้วย SMS แล้ว)
+  name       String?
+  createdAt  DateTime @default(now()) @map("created_at")
   @@map("users")
-}
-model OtpCode {
-  id         Int       @id @default(autoincrement())
-  phone      String
-  codeHash   String    @map("code_hash")
-  expiresAt  DateTime  @map("expires_at")
-  attempts   Int       @default(0)
-  consumedAt DateTime? @map("consumed_at")
-  createdAt  DateTime  @default(now()) @map("created_at")
-  @@index([phone, createdAt])
-  @@map("otp_codes")
-}
-model Session {
-  id        Int      @id @default(autoincrement())
-  tokenHash String   @unique @map("token_hash")
-  userId    Int      @map("user_id")
-  expiresAt DateTime @map("expires_at")
-  createdAt DateTime @default(now()) @map("created_at")
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  @@index([userId])
-  @@map("sessions")
 }

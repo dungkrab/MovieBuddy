@@ -1,0 +1,37 @@
+# วางไว้ที่รากโปรเจกต์ (โฟลเดอร์เดียวกับ docker-compose.yml) — เป็น build context ของทุก Dockerfile
+# หมายเหตุ: Dockerfile ใช้ "COPY services/<x> ." และ "COPY web ." ถ้าไม่ตัด node_modules/.next
+#           ของเครื่องตัวเองออก จะไปทับของที่ npm install ใน image (พังได้ถ้าเครื่องเป็น Windows/Mac)
+
+# --- ความลับ: ห้ามเข้า image/build context ---
+.env
+.env.*
+!.env.example
+
+# --- ของที่สร้างใหม่ใน image อยู่แล้ว ---
+**/node_modules
+**/.next
+**/dist
+**/coverage
+**/.turbo
+**/*.tsbuildinfo
+**/npm-debug.log*
+**/*.log
+
+# --- git / editor / OS ---
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+.DS_Store
+**/Thumbs.db
+
+# --- ไฟล์ deploy ที่ไม่ได้ใช้ตอน build image ---
+infra
+docker-compose*.yml
+Caddyfile
+*.md
+.dockerignore
+
+# --- โฟลเดอร์ขยะจาก mkdir {a,b,c} บน Windows ---
+{services*

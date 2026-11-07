@@ -1,4 +1,49 @@
-# Environment variables
+# ---------- ความลับ / ค่าตั้งเฉพาะเครื่อง ----------
 .env
 .env.*
 !.env.example
+
+# ---------- Node ----------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- Next.js (web) ----------
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# ---------- Build / test output ----------
+dist/
+build/
+coverage/
+
+# ---------- ตัวจำลอง Cognito (ข้อมูลผู้ใช้ทดสอบ) ----------
+.cognito/
+
+# ---------- Prisma ----------
+*.db
+*.db-journal
+
+# ---------- Log / ไฟล์ชั่วคราว ----------
+*.log
+*.pid
+tmp/
+.cache/
+
+# ---------- Editor / OS ----------
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---------- Cert / key ----------
+*.pem
+*.key
+!infra/**/*.pem

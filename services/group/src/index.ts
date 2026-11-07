@@ -121,6 +121,17 @@ app.delete("/groups/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+// chat-service เรียกเช็กสิทธิ์: เป็นสมาชิกของกลุ่มที่ยังไม่หมดอายุหรือไม่ (ส่งตัวตนมาทาง x-user-id เหมือน endpoint อื่น)
+app.get("/groups/:id/membership", async (c) => {
+  const { id: uid } = who(c);
+  if (!uid) return c.json({ error: "กรุณาเข้าสู่ระบบ" }, 401);
+  const id = Number(c.req.param("id"));
+  const g = Number.isInteger(id) ? await prisma.movieGroup.findUnique({ where: { id }, select: { title: true, endsAt: true, expiresAt: true } }) : null;
+  if (!g || g.expiresAt <= new Date()) return c.json({ error: "ไม่พบกลุ่มนี้" }, 404);
+  const member = !!(await prisma.groupMember.findUnique({ where: { groupId_userId: { groupId: id, userId: uid } }, select: { id: true } }));
+  return c.json({ member, title: g.title, endsAt: g.endsAt, expiresAt: g.expiresAt });
+});
+
 app.post("/groups/:id/join", async (c) => {
   const user = who(c);
   if (!user.id) return c.json({ error: "กรุณาเข้าสู่ระบบก่อนเข้าร่วมกลุ่ม" }, 401);
