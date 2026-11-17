@@ -40,8 +40,8 @@ async function ensureLocalPool() {
   let poolId = pools.UserPools?.find((p) => p.Name === NAME)?.Id;
   if (!poolId) {
     const r = await client.send(new CreateUserPoolCommand({
-      PoolName: NAME, UsernameAttributes: ["phone_number"], AutoVerifiedAttributes: ["phone_number"],
-      Policies: { PasswordPolicy: { MinimumLength: 8, RequireNumbers: true, RequireLowercase: false, RequireUppercase: false, RequireSymbols: false } },
+      PoolName: NAME, UsernameAttributes: ["email"], AutoVerifiedAttributes: ["email"],
+      Policies: { PasswordPolicy: { MinimumLength: 8, RequireNumbers: true, RequireLowercase: true, RequireUppercase: true, RequireSymbols: true } },
     }));
     poolId = r.UserPool!.Id!;
   }
@@ -57,21 +57,21 @@ async function ensureLocalPool() {
   return { poolId, clientId };
 }
 
-// แปลง error ของ Cognito เป็นข้อความไทย (ไม่บอกว่าเบอร์นี้มีบัญชีหรือไม่ตอนล็อกอิน/ลืมรหัส)
+// แปลง error ของ Cognito เป็นข้อความไทย (ไม่บอกว่าอีเมลนี้มีบัญชีหรือไม่ตอนล็อกอิน/ลืมรหัส)
 type Ctx = "signup" | "confirm" | "login" | "forgot" | "reset" | "refresh" | "other";
 function fail(e: any, ctx: Ctx): never {
   if (e instanceof AuthError) throw e;
   const n = e?.name as string;
-  if (n === "UsernameExistsException") throw new AuthError(409, "เบอร์นี้สมัครไว้แล้ว — เข้าสู่ระบบ หรือกดยืนยันรหัสที่ส่งไปทาง SMS", { exists: true });
+  if (n === "UsernameExistsException") throw new AuthError(409, "อีเมลนี้สมัครไว้แล้ว — เข้าสู่ระบบ หรือกดยืนยันรหัสที่ส่งไปทางอีเมล", { exists: true });
   if (ctx === "forgot" && n === "UserNotFoundException") throw new AuthError(404, "ไม่พบบัญชี");
-  if (n === "UserNotConfirmedException") throw new AuthError(403, "เบอร์นี้ยังไม่ได้ยืนยันรหัส SMS", { needsConfirm: true });
+  if (n === "UserNotConfirmedException") throw new AuthError(403, "อีเมลนี้ยังไม่ได้ยืนยันรหัส", { needsConfirm: true });
   if (n === "CodeMismatchException" || n === "ExpiredCodeException") throw new AuthError(400, "รหัสไม่ถูกต้องหรือหมดอายุ");
-  if (n === "InvalidPasswordException" && ctx !== "login") throw new AuthError(400, "รหัสผ่านไม่ตรงตามเงื่อนไข (อย่างน้อย 8 ตัวอักษร และมีตัวเลข)");
-  if (ctx === "login" && ["NotAuthorizedException", "UserNotFoundException", "InvalidPasswordException"].includes(n)) throw new AuthError(401, "เบอร์หรือรหัสผ่านไม่ถูกต้อง");
+  if (n === "InvalidPasswordException" && ctx !== "login") throw new AuthError(400, "รหัสผ่านไม่ตรงตามเงื่อนไข (อย่างน้อย 8 ตัวอักษร มีตัวพิมพ์เล็ก ตัวพิมพ์ใหญ่ ตัวเลข และอักขระพิเศษ)");
+  if (ctx === "login" && ["NotAuthorizedException", "UserNotFoundException", "InvalidPasswordException"].includes(n)) throw new AuthError(401, "อีเมลหรือรหัสผ่านไม่ถูกต้อง");
   if (ctx === "refresh" && ["NotAuthorizedException", "UserNotFoundException"].includes(n)) throw new AuthError(401, "เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่");
   if (["TooManyRequestsException", "LimitExceededException", "TooManyFailedAttemptsException"].includes(n)) throw new AuthError(429, "ลองบ่อยเกินไป รอสักครู่แล้วลองใหม่");
   if (n === "InvalidParameterException") throw new AuthError(400, "ข้อมูลไม่ถูกต้อง");
-  if (n === "CodeDeliveryFailureException") throw new AuthError(502, "ส่ง SMS ไม่สำเร็จ ลองใหม่อีกครั้ง");
+  if (n === "CodeDeliveryFailureException") throw new AuthError(502, "ส่งอีเมลไม่สำเร็จ ลองใหม่อีกครั้ง");
   if (n === "Unsupported") throw new AuthError(501, "ฟีเจอร์นี้ตัวจำลอง Cognito (local) ยังไม่รองรับ — ใช้ได้บน Cognito จริง");
   console.error(`[auth] cognito ${ctx} failed:`, n, e?.message);
   throw new AuthError(502, "ระบบยืนยันตัวตนไม่พร้อมใช้งาน ลองใหม่อีกครั้ง");
@@ -80,18 +80,18 @@ async function run<T>(ctx: Ctx, fn: (c: Cfg) => Promise<T>): Promise<T> {
   try { return await fn(await config()); } catch (e) { return fail(e, ctx); }
 }
 
-export const signUp = (phone: string, password: string, name: string) => run("signup", async (c) => {
+export const signUp = (email: string, password: string, name: string) => run("signup", async (c) => {
   await client.send(new SignUpCommand({
-    ClientId: c.clientId, Username: phone, Password: password,
-    UserAttributes: [{ Name: "phone_number", Value: phone }, { Name: "name", Value: name }],
+    ClientId: c.clientId, Username: email, Password: password,
+    UserAttributes: [{ Name: "email", Value: email }, { Name: "name", Value: name }],
   }));
 });
-export const confirmSignUp = (phone: string, code: string) => run("confirm", async (c) => { await client.send(new ConfirmSignUpCommand({ ClientId: c.clientId, Username: phone, ConfirmationCode: code })); });
-export const resendCode = (phone: string) => run("confirm", async (c) => { await client.send(new ResendConfirmationCodeCommand({ ClientId: c.clientId, Username: phone })); });
+export const confirmSignUp = (email: string, code: string) => run("confirm", async (c) => { await client.send(new ConfirmSignUpCommand({ ClientId: c.clientId, Username: email, ConfirmationCode: code })); });
+export const resendCode = (email: string) => run("confirm", async (c) => { await client.send(new ResendConfirmationCodeCommand({ ClientId: c.clientId, Username: email })); });
 
 export type Tokens = { accessToken: string; refreshToken: string; accessExp: number };
-export const login = (phone: string, password: string) => run("login", async (c): Promise<Tokens> => {
-  const r = await client.send(new InitiateAuthCommand({ ClientId: c.clientId, AuthFlow: "USER_PASSWORD_AUTH", AuthParameters: { USERNAME: phone, PASSWORD: password } }));
+export const login = (email: string, password: string) => run("login", async (c): Promise<Tokens> => {
+  const r = await client.send(new InitiateAuthCommand({ ClientId: c.clientId, AuthFlow: "USER_PASSWORD_AUTH", AuthParameters: { USERNAME: email, PASSWORD: password } }));
   const a = r.AuthenticationResult;
   if (!a?.AccessToken || !a.RefreshToken) throw new AuthError(502, "ระบบยืนยันตัวตนตอบกลับไม่ครบ (บัญชีอาจต้องทำขั้นตอนเพิ่ม)");
   return { accessToken: a.AccessToken, refreshToken: a.RefreshToken, accessExp: expOf(a.AccessToken) };
@@ -103,13 +103,13 @@ export const refresh = (refreshToken: string) => run("refresh", async (c) => {
   return { accessToken: t, accessExp: expOf(t) };
 });
 export const revoke = (refreshToken: string) => run("other", async (c) => { await client.send(new RevokeTokenCommand({ ClientId: c.clientId, Token: refreshToken })); }).catch(() => {}); // best-effort
-export const forgotPassword = (phone: string) => run("forgot", async (c) => { await client.send(new ForgotPasswordCommand({ ClientId: c.clientId, Username: phone })); });
-export const resetPassword = (phone: string, code: string, password: string) => run("reset", async (c) => { await client.send(new ConfirmForgotPasswordCommand({ ClientId: c.clientId, Username: phone, ConfirmationCode: code, Password: password })); });
+export const forgotPassword = (email: string) => run("forgot", async (c) => { await client.send(new ForgotPasswordCommand({ ClientId: c.clientId, Username: email })); });
+export const resetPassword = (email: string, code: string, password: string) => run("reset", async (c) => { await client.send(new ConfirmForgotPasswordCommand({ ClientId: c.clientId, Username: email, ConfirmationCode: code, Password: password })); });
 
 export const getProfile = (accessToken: string) => run("other", async () => {
   const r = await client.send(new GetUserCommand({ AccessToken: accessToken }));
   const at = (n: string) => r.UserAttributes?.find((a) => a.Name === n)?.Value ?? null;
-  return { phone: at("phone_number"), name: at("name") };
+  return { email: at("email"), name: at("name") };
 });
 
 function expOf(jwt: string): number { try { return JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString()).exp; } catch { return 0; } }

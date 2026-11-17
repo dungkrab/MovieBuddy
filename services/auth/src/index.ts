@@ -4,7 +4,7 @@ import { Hono } from "hono";
 import { guard } from "../../shared/guard";
 import * as cognito from "./cognito";
 import { AuthError } from "./cognito";
-import { maskPhone, normalizeThaiPhone } from "./phone";
+import { maskEmail, normalizeEmail } from "./email";
 
 const prisma = new PrismaClient();
 const app = new Hono();
@@ -19,23 +19,27 @@ app.onError((e, c) => {
 });
 
 const body = async (c: any) => (await c.req.json().catch(() => null)) ?? {};
-const phoneOf = (b: any) => { const p = normalizeThaiPhone(b.phone); if (!p) throw new AuthError(400, "เบอร์ไม่ถูกต้อง (เบอร์มือถือไทย 10 หลัก เช่น 0812345678)"); return p; };
+const emailOf = (b: any) => { const e = normalizeEmail(b.email); if (!e) throw new AuthError(400, "อีเมลไม่ถูกต้อง"); return e; };
 const codeOf = (b: any) => { const s = String(b.code ?? "").trim(); if (!/^\d{4,8}$/.test(s)) throw new AuthError(400, "รหัสไม่ถูกต้องหรือหมดอายุ"); return s; };
-const passwordOf = (b: any) => { const s = typeof b.password === "string" ? b.password : ""; if (s.length < 8 || s.length > 64 || !/\d/.test(s)) throw new AuthError(400, "รหัสผ่านต้องยาว 8–64 ตัวอักษร และมีตัวเลข"); return s; };
+// password policy ของ Cognito user pool: ตัวเลข + อักขระพิเศษ + ตัวพิมพ์ใหญ่ + ตัวพิมพ์เล็ก (+ ยาวขั้นต่ำ 8) — ต้องตรงกับ LoginForm และค่าใน Cognito console
+const SPECIAL = /[\^$*.\[\]{}()?\-"!@#%&\/\\,><':;|_~`+=]/;
+const passwordOk = (s: string) => s.length >= 8 && s.length <= 64 && /\d/.test(s) && /[a-z]/.test(s) && /[A-Z]/.test(s) && SPECIAL.test(s);
+const PASSWORD_MSG = "รหัสผ่านต้องยาว 8–64 ตัวอักษร และมีตัวพิมพ์เล็ก ตัวพิมพ์ใหญ่ ตัวเลข และอักขระพิเศษอย่างน้อยอย่างละ 1 ตัว";
+const passwordOf = (b: any) => { const s = typeof b.password === "string" ? b.password : ""; if (!passwordOk(s)) throw new AuthError(400, PASSWORD_MSG); return s; };
 const tokenOf = (c: any) => c.req.header("authorization")?.replace(/^Bearer /i, "") ?? "";
 
-/** หาผู้ใช้ภายในจาก sub ของ Cognito; ครั้งแรกจะดึงเบอร์/ชื่อจาก Cognito แล้วสร้างแถว หรือผูกกับผู้ใช้เก่า (ระบบ OTP) ด้วยเบอร์โทรเดียวกัน */
+/** หาผู้ใช้ภายในจาก sub ของ Cognito; ครั้งแรกจะดึงอีเมล/ชื่อจาก Cognito แล้วสร้างแถว หรือผูกกับแถวเดิมที่อีเมลเดียวกัน (เช่น สร้าง user pool ใหม่ → sub เปลี่ยน) */
 async function userFor(sub: string, accessToken: string) {
   const found = await prisma.user.findUnique({ where: { cognitoSub: sub } });
   if (found) return found;
   const p = await cognito.getProfile(accessToken);
-  const phone = normalizeThaiPhone(p.phone);
-  if (!phone) throw new AuthError(502, "บัญชี Cognito ไม่มีเบอร์โทร");
+  const email = normalizeEmail(p.email);
+  if (!email) throw new AuthError(502, "บัญชี Cognito ไม่มีอีเมล");
   const name = p.name?.trim().slice(0, 40) || null;
   try {
-    const legacy = await prisma.user.findUnique({ where: { phone } });
-    if (legacy) return await prisma.user.update({ where: { id: legacy.id }, data: { cognitoSub: sub, name: legacy.name ?? name } }); // เบอร์ผ่าน SMS ยืนยันแล้ว → ผูกบัญชีเก่าให้ (กลุ่มเดิมยังอยู่)
-    return await prisma.user.create({ data: { cognitoSub: sub, phone, name } });
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) return await prisma.user.update({ where: { id: existing.id }, data: { cognitoSub: sub, name: existing.name ?? name } }); // อีเมลผ่านการยืนยันรหัสแล้ว (ล็อกอินได้เฉพาะบัญชีที่ confirm) → ผูกแถวเดิมให้ กลุ่มเดิมยังอยู่
+    return await prisma.user.create({ data: { cognitoSub: sub, email, name } });
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") { // คำขอแรกสองอันชนกัน → ใช้แถวที่อีกอันสร้างไว้
       const again = await prisma.user.findUnique({ where: { cognitoSub: sub } });
@@ -44,21 +48,21 @@ async function userFor(sub: string, accessToken: string) {
     throw e;
   }
 }
-const publicUser = (u: { id: number; name: string | null; phone: string }) => ({ id: u.id, name: u.name, phone: maskPhone(u.phone) });
+const publicUser = (u: { id: number; name: string | null; email: string }) => ({ id: u.id, name: u.name, email: maskEmail(u.email) });
 
 app.post("/signup", async (c) => {
   const b = await body(c);
   const name = typeof b.name === "string" ? b.name.trim().slice(0, 40) : "";
   if (!name) throw new AuthError(400, "กรอกชื่อที่ใช้แสดง");
-  await cognito.signUp(phoneOf(b), passwordOf(b), name);
+  await cognito.signUp(emailOf(b), passwordOf(b), name);
   return c.json({ ok: true, needsConfirm: true });
 });
-app.post("/confirm", async (c) => { const b = await body(c); await cognito.confirmSignUp(phoneOf(b), codeOf(b)); return c.json({ ok: true }); });
-app.post("/resend", async (c) => { const b = await body(c); await cognito.resendCode(phoneOf(b)); return c.json({ ok: true }); });
+app.post("/confirm", async (c) => { const b = await body(c); await cognito.confirmSignUp(emailOf(b), codeOf(b)); return c.json({ ok: true }); });
+app.post("/resend", async (c) => { const b = await body(c); await cognito.resendCode(emailOf(b)); return c.json({ ok: true }); });
 
 app.post("/login", async (c) => {
   const b = await body(c);
-  const t = await cognito.login(phoneOf(b), typeof b.password === "string" ? b.password : "");
+  const t = await cognito.login(emailOf(b), typeof b.password === "string" ? b.password : "");
   const v = await cognito.verifyAccessToken(t.accessToken);
   if (!v || "expired" in v) throw new AuthError(502, "ตรวจโทเคนไม่ผ่าน (ตั้งค่า issuer/JWKS ของ Cognito ถูกต้องหรือไม่)");
   const u = await userFor(v.sub, t.accessToken);
@@ -78,14 +82,14 @@ app.get("/session", async (c) => {
 });
 app.post("/logout", async (c) => { const b = await body(c); if (typeof b.refreshToken === "string" && b.refreshToken) await cognito.revoke(b.refreshToken); return c.json({ ok: true }); });
 
-// ลืมรหัสผ่าน: ตอบ ok เสมอ ไม่บอกว่าเบอร์นี้มีบัญชีหรือไม่
+// ลืมรหัสผ่าน: ตอบ ok เสมอ ไม่บอกว่าอีเมลนี้มีบัญชีหรือไม่
 app.post("/password/forgot", async (c) => {
-  const phone = phoneOf(await body(c));
-  try { await cognito.forgotPassword(phone); }
+  const email = emailOf(await body(c));
+  try { await cognito.forgotPassword(email); }
   catch (e) { if (!(e instanceof AuthError && [400, 401, 403, 404].includes(e.status))) throw e; }
   return c.json({ ok: true });
 });
-app.post("/password/reset", async (c) => { const b = await body(c); await cognito.resetPassword(phoneOf(b), codeOf(b), passwordOf(b)); return c.json({ ok: true }); });
+app.post("/password/reset", async (c) => { const b = await body(c); await cognito.resetPassword(emailOf(b), codeOf(b), passwordOf(b)); return c.json({ ok: true }); });
 
 app.patch("/users/:id", async (c) => {
   const b = await body(c);

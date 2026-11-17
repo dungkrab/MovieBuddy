@@ -10,8 +10,8 @@ datasource db {
 // หมายเหตุย้ายจากระบบ OTP เดิม: ตาราง otp_codes และ sessions เลิกใช้แล้ว (ถ้ามีข้อมูลค้าง ให้ DROP เองก่อนรัน db push)
 model User {
   id         Int      @id @default(autoincrement())
-  cognitoSub String?  @unique @map("cognito_sub") // null = ผู้ใช้เก่าจากระบบ OTP ที่ยังไม่เคยล็อกอินด้วย Cognito (จะผูกให้อัตโนมัติด้วยเบอร์โทร)
-  phone      String   @unique // E.164 เช่น +66812345678 (Cognito ยืนยันด้วย SMS แล้ว)
+  cognitoSub String?  @unique @map("cognito_sub") // null = ผู้ใช้เก่าที่ยังไม่เคยล็อกอินด้วย Cognito (จะผูกให้อัตโนมัติด้วยอีเมล)
+  email      String   @unique // เก็บเป็นตัวพิมพ์เล็ก (Cognito ยืนยันด้วยรหัสทางอีเมลแล้ว)
   name       String?
   createdAt  DateTime @default(now()) @map("created_at")
   @@map("users")

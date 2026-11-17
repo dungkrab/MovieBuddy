@@ -47,3 +47,5 @@ Thumbs.db
 *.pem
 *.key
 !infra/**/*.pem
+
+build-push.sh

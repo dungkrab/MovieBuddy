@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { PrismaClient } from "@prisma/client";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { guard } from "../../shared/guard";
+import { createRedis, logRedisErr } from "./redis";
 
 const prisma = new PrismaClient();
 const app = new Hono();
@@ -13,8 +15,25 @@ const MAX_BODY = 1000, PAGE = 50, HEARTBEAT_MS = 20_000;
 type Msg = { id: number; userId: number; userName: string; body: string; createdAt: Date };
 const dto = (m: Msg) => ({ id: m.id, userId: m.userId, userName: m.userName, body: m.body, createdAt: m.createdAt.toISOString() });
 
-// ผู้ติดตามห้อง (SSE) ต่อกลุ่ม — อยู่ในหน่วยความจำของ process นี้ ใช้ได้เมื่อรัน chat 1 instance (ถ้าจะขยายหลายตัวต้องใช้ Redis pub/sub)
+// ผู้ติดตามห้อง (SSE) ต่อกลุ่ม — อยู่ในหน่วยความจำของ task นี้ (เฉพาะคนที่ต่อ SSE กับ task นี้)
 const subs = new Map<number, Set<(m: Msg) => void>>();
+const deliver = (gid: number, m: Msg) => subs.get(gid)?.forEach((push) => push(m));
+
+// กระจายข้อความข้าม task ด้วย ElastiCache (Valkey) pub/sub: ข้อความจริงเก็บที่ RDS, Valkey ทำหน้าที่ "ส่งต่อสด" เท่านั้น
+// ตั้ง REDIS_URL เพื่อเปิดใช้ (ไม่ตั้ง = ทำงานแบบเดิม ใช้ได้เฉพาะ 1 task)
+const CHANNEL = "chat:messages", ORIGIN = randomUUID(); // ORIGIN = ตัวระบุ task นี้ ไว้ข้ามข้อความที่ตัวเองเป็นคนส่ง
+const pub = createRedis("chat-pub", { failFast: true });
+const sub = createRedis("chat-sub"); // subscriber ต้องใช้ connection แยก (เชื่อมต่อใหม่แล้ว subscribe ซ้ำให้อัตโนมัติ)
+if (sub) {
+  sub.subscribe(CHANNEL).catch((e) => logRedisErr("subscribe", e));
+  sub.on("message", (_ch: string, raw: string) => {
+    try {
+      const { origin, gid, m } = JSON.parse(raw);
+      if (origin === ORIGIN) return;
+      deliver(Number(gid), { ...m, createdAt: new Date(m.createdAt) });
+    } catch (e) { logRedisErr("ข้อความจาก pub/sub อ่านไม่ได้", e); }
+  });
+}
 
 function who(c: any) { // web (BFF) ตรวจ session กับ auth แล้วส่งตัวตนมาทาง header ภายใน
   const id = Number(c.req.header("x-user-id")) || null;
@@ -37,9 +56,9 @@ async function access(c: any): Promise<Access> {
     res = await fetch(`${process.env.GROUP_URL}/groups/${gid}/membership`, {
       headers: { "x-internal-key": process.env.INTERNAL_KEY!, "x-user-id": String(uid) }, signal: AbortSignal.timeout(5000),
     });
-  } catch { return { ok: false, status: 503, error: "ตรวจสิทธิ์กลุ่มไม่สำเร็จ ลองใหม่อีกครั้ง" }; }
+  } catch { return { ok: false, status: 503, error: "เชื่อมต่อข้อมูลกลุ่มไม่ได้หรือใช้เวลานานเกินไป กรุณาลองใหม่" }; }
   if (res.status === 404) return { ok: false, status: 404, error: "ไม่พบกลุ่มนี้ (อาจถูกลบหรือหมดอายุแล้ว)" };
-  if (!res.ok) return { ok: false, status: 503, error: "ตรวจสิทธิ์กลุ่มไม่สำเร็จ ลองใหม่อีกครั้ง" };
+  if (!res.ok) return { ok: false, status: 503, error: "ตรวจสิทธิ์กลุ่มไม่สำเร็จ กรุณาลองใหม่อีกครั้ง" };
   const g: any = await res.json().catch(() => null);
   if (!g?.member) return { ok: false, status: 403, error: "เฉพาะสมาชิกของกลุ่มเท่านั้นที่เข้าห้องแชทได้" };
   const expiresAt = new Date(g.expiresAt);
@@ -48,7 +67,7 @@ async function access(c: any): Promise<Access> {
   return { ok: true, uid, name, expiresAt };
 }
 
-// กันส่งรัว: 10 ข้อความ / 10 วินาที ต่อผู้ใช้
+// กันส่งรัว: 10 ข้อความ / 10 วินาที ต่อผู้ใช้ (นับต่อ task — เมื่อรันหลาย task ผู้ใช้อาจส่งได้มากกว่านี้เล็กน้อย)
 const hits = new Map<number, number[]>();
 function limited(uid: number) {
   const now = Date.now(), recent = (hits.get(uid) ?? []).filter((t) => now - t < 10_000);
@@ -77,7 +96,8 @@ app.post("/groups/:gid/messages", async (c) => {
   if (text.length > MAX_BODY) return c.json({ error: `ข้อความยาวเกิน ${MAX_BODY} ตัวอักษร` }, 400);
   if (limited(a.uid)) return c.json({ error: "ส่งถี่เกินไป รอสักครู่" }, 429);
   const m = await prisma.message.create({ data: { groupId: gid, userId: a.uid, userName: a.name.slice(0, 40), body: text, expiresAt: a.expiresAt } });
-  subs.get(gid)?.forEach((push) => push(m));
+  deliver(gid, m); // คนที่ต่อ SSE กับ task นี้ได้ทันที
+  pub?.publish(CHANNEL, JSON.stringify({ origin: ORIGIN, gid, m })).catch((e) => logRedisErr("publish", e)); // task อื่นรับต่อผ่าน Valkey
   return c.json({ message: dto(m) }, 201);
 });
 
@@ -92,7 +112,7 @@ app.get("/groups/:gid/stream", async (c) => {
     let set = subs.get(gid); if (!set) subs.set(gid, (set = new Set())); set.add(push); // สมัครก่อนแล้วค่อยเติมของที่พลาด กันข้อความตกหล่นช่วงรอยต่อ
     stream.onAbort(() => { closed = true; wake?.(); });
     let sent = lastId;
-    const send = async (m: Msg) => { if (m.id <= sent) return; sent = m.id; await stream.writeSSE({ id: String(m.id), event: "message", data: JSON.stringify(dto(m)) }); };
+    const send = async (m: Msg) => { if (m.id <= sent) return; sent = m.id; await stream.writeSSE({ id: String(m.id), event: "message", data: JSON.stringify(dto(m)) }); }; // ข้ามข้อความซ้ำด้วย id
     try {
       if (lastId > 0) for (const m of await prisma.message.findMany({ where: { groupId: gid, id: { gt: lastId } }, orderBy: { id: "asc" }, take: 200 })) await send(m);
       await stream.writeSSE({ event: "ready", data: "{}" });
@@ -100,7 +120,11 @@ app.get("/groups/:gid/stream", async (c) => {
         while (queue.length) await send(queue.shift()!);
         await new Promise<void>((resolve) => { const t = setTimeout(resolve, Math.max(0, Math.min(HEARTBEAT_MS, +a.expiresAt - Date.now()))); wake = () => { clearTimeout(t); resolve(); }; });
         wake = null;
-        if (!closed && !queue.length) await stream.write(": ping\n\n"); // heartbeat กัน proxy ตัดการเชื่อมต่อ
+        if (!closed && !queue.length) {
+          await stream.write(": ping\n\n"); // heartbeat กัน proxy/ALB ตัดการเชื่อมต่อ
+          // กันข้อความตกหล่นถ้า pub/sub หลุดชั่วคราว: เมื่อใช้ Valkey ให้เช็ก DB เติมของที่ยังไม่ได้ส่งทุกรอบ heartbeat
+          if (pub) for (const m of await prisma.message.findMany({ where: { groupId: gid, id: { gt: sent } }, orderBy: { id: "asc" }, take: 50 })) await send(m);
+        }
       }
     } catch { /* ไคลเอนต์ตัดการเชื่อมต่อ */ }
     finally { set.delete(push); if (!set.size) subs.delete(gid); }
@@ -109,6 +133,6 @@ app.get("/groups/:gid/stream", async (c) => {
 
 const sweep = () => prisma.message.deleteMany({ where: { expiresAt: { lt: new Date() } } })
   .then((r) => { if (r.count) console.log("expired messages removed:", r.count); }).catch((e) => console.error("sweep failed:", e.message));
-sweep(); setInterval(sweep, 30 * 60e3);
+sweep(); setInterval(sweep, 30 * 60e3); // ทุก task รันเอง — ลบซ้ำกันได้ ไม่ทำให้ข้อมูลเสีย
 
 serve({ fetch: app.fetch, port: Number(process.env.PORT ?? 4007) });
