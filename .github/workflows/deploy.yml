@@ -1,3 +1,4 @@
+
 name: CI/CD
 
 on:
@@ -7,62 +8,109 @@ on:
     branches: [main]
 
 permissions:
-  id-token: write   # ให้ GitHub ขอ token ชั่วคราวเพื่อ assume IAM role (OIDC) — ไม่ต้องเก็บ access key
+  id-token: write
   contents: read
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION }}          # เช่น ap-southeast-1
-  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}        # ชื่อ ECS cluster
-  NAME_PREFIX: ${{ vars.NAME_PREFIX }}        # เช่น moviebuddy → ECR repo, ECS service และ task family = moviebuddy-<service>
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  NAME_PREFIX: ${{ vars.NAME_PREFIX }}
 
 jobs:
-  # 1) หาว่า service ไหนมีไฟล์เปลี่ยน → build/deploy เฉพาะตัวนั้น
+  # 1. Detect changed services
   changes:
     runs-on: ubuntu-latest
     outputs:
       services: ${{ steps.diff.outputs.services }}
+
     steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-      - id: diff
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changes
+        id: diff
+        shell: bash
         run: |
           ALL='["web","auth","movie","location","cinema","group","chat","showtime"]'
-          BASE="${{ github.event.before || github.event.pull_request.base.sha }}"
-          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
-            echo "services=$ALL" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          CH=$(git diff --name-only "$BASE" "${{ github.sha }}")
-          if echo "$CH" | grep -q '^services/shared/'; then echo "services=$ALL" >> "$GITHUB_OUTPUT"; exit 0; fi
-          list=()
-          for s in auth movie location cinema group chat showtime; do
-            echo "$CH" | grep -q "^services/$s/" && list+=("$s")
-          done
-          echo "$CH" | grep -q '^web/' && list+=("web")
-          echo "services=$(jq -nc '$ARGS.positional' --args "${list[@]}")" >> "$GITHUB_OUTPUT"
 
-  # 2) build image (ทุก PR และทุก push); push ขึ้น ECR + deploy เฉพาะ push เข้า main
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+
+          if [ -z "$BASE" ] || \
+             [ "$BASE" = "0000000000000000000000000000000000000000" ] || \
+             ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "services=$ALL" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CH=$(git diff --name-only "$BASE" "${{ github.sha }}")
+
+          # Shared files or root-level changes trigger all services
+          if echo "$CH" | grep -q '^services/shared/' || \
+             echo "$CH" | grep -qvE '^(services/(auth|movie|location|cinema|group|chat|showtime)/|web/)'; then
+            echo "services=$ALL" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          list=()
+
+          for s in auth movie location cinema group chat showtime; do
+            if echo "$CH" | grep -q "^services/$s/"; then
+              list+=("$s")
+            fi
+          done
+
+          if echo "$CH" | grep -q '^web/'; then
+            list+=("web")
+          fi
+
+          SERVICES=$(jq -nc '$ARGS.positional' --args "${list[@]}")
+          echo "services=$SERVICES" >> "$GITHUB_OUTPUT"
+
+          echo "Changed services: $SERVICES"
+
+  # 2. Build and deploy changed services
   build-deploy:
     needs: changes
     if: needs.changes.outputs.services != '[]'
+
     runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       matrix:
         service: ${{ fromJSON(needs.changes.outputs.services) }}
-    steps:
-      - uses: actions/checkout@v4
 
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Resolve Dockerfile path
       - name: Resolve Dockerfile
         id: df
+        shell: bash
         run: |
-          if [ "${{ matrix.service }}" = "web" ]; then echo "path=web/Dockerfile" >> "$GITHUB_OUTPUT"
-          else echo "path=services/${{ matrix.service }}/Dockerfile" >> "$GITHUB_OUTPUT"; fi
+          if [ "${{ matrix.service }}" = "web" ]; then
+            echo "path=web/Dockerfile" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=services/${{ matrix.service }}/Dockerfile" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Build (PR: ตรวจว่า build ผ่านเท่านั้น)
+      # PR: Build only, never access AWS
+      - name: Build Docker Image (PR)
         if: github.event_name == 'pull_request'
-        run: docker build -f "${{ steps.df.outputs.path }}" -t "${{ matrix.service }}:pr" .
+        run: |
+          docker build \
+            -f "${{ steps.df.outputs.path }}" \
+            -t "${{ matrix.service }}:pr" .
 
-      - name: Configure AWS credentials (OIDC)
+      # Push to main: Authenticate with AWS
+      - name: Configure AWS Credentials
         if: github.event_name == 'push'
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -74,32 +122,42 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # Build and push image
       - name: Build and Push Image
         if: github.event_name == 'push'
         id: image
+        shell: bash
         run: |
           IMAGE="${{ steps.ecr.outputs.registry }}/${NAME_PREFIX}-${{ matrix.service }}:${{ github.sha }}"
-          docker build -f "${{ steps.df.outputs.path }}" -t "$IMAGE" .
+
+          docker build \
+            -f "${{ steps.df.outputs.path }}" \
+            -t "$IMAGE" .
+
           docker push "$IMAGE"
+
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
-      # ดึง task definition ปัจจุบันมาเปลี่ยนเฉพาะ image แล้วลงทะเบียนเป็น revision ใหม่ (env/secret ที่ตั้งไว้ยังอยู่)
+      # Get current task definition
       - name: Get current task definition
         if: github.event_name == 'push'
         run: |
-          aws ecs describe-task-definition --task-definition "${NAME_PREFIX}-${{ matrix.service }}" \
+          aws ecs describe-task-definition \
+            --task-definition "${NAME_PREFIX}-${{ matrix.service }}" \
             --query taskDefinition > task-def.json
 
-      - name: Render task definition with new image
+      # Update container image
+      - name: Render task definition
         if: github.event_name == 'push'
         id: render
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: task-def.json
-          container-name: ${{ matrix.service }}    # ต้องตรงกับชื่อ container ใน task definition
+          container-name: ${{ matrix.service }}
           image: ${{ steps.image.outputs.image }}
 
-      - name: Deploy to ECS (rolling update) and wait until stable
+      # Deploy to ECS
+      - name: Deploy to ECS
         if: github.event_name == 'push'
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
